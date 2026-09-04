@@ -4,6 +4,7 @@ import { Navbar } from './components/Navbar';
 import { HomeScreen } from './components/screens/HomeScreen';
 import { PlayScreen } from './components/screens/PlayScreen';
 import { PlayVsAIScreen } from './components/screens/PlayVsAIScreen';
+import { PlayOfflinePvPScreen } from './components/screens/PlayOfflinePvPScreen';
 import { PlayOnlineScreen } from './components/screens/PlayOnlineScreen';
 import { AITutorScreen } from './components/screens/AITutorScreen';
 import { AnalysisScreen } from './components/screens/AnalysisScreen';
@@ -164,12 +165,15 @@ export const App: React.FC = () => {
             onSelectMode={(mode) => {
               if (mode === 'vs_ai') setActiveScreen('vs_ai');
               else if (mode === 'online') setActiveScreen('online');
-              else if (mode === 'offline_pvp') setActiveScreen('vs_ai');
+              else if (mode === 'offline_pvp') setActiveScreen('offline_pvp');
             }}
           />
         )}
         {activeScreen === 'vs_ai' && (
           <PlayVsAIScreen settings={settings} onGameComplete={handleGameComplete} />
+        )}
+        {activeScreen === 'offline_pvp' && (
+          <PlayOfflinePvPScreen settings={settings} />
         )}
         {activeScreen === 'online' && (
           <PlayOnlineScreen settings={settings} username={userProfile.username} />

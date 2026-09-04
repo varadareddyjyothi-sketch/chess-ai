@@ -7,6 +7,15 @@ import { Chess } from 'chess.js';
 const app = express();
 app.use(cors());
 
+// Health Check Endpoint
+app.get('/', (req, res) => {
+  res.json({ status: 'online', service: 'ChessMind Socket Server', activeRooms: Object.keys(rooms).length });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', activeRooms: Object.keys(rooms).length });
+});
+
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
@@ -47,24 +56,62 @@ function generateRoomCode(): string {
   return code;
 }
 
+// Server clock tick interval for active games (1 second precision)
+setInterval(() => {
+  for (const code in rooms) {
+    const room = rooms[code];
+    if (room.status === 'playing' && room.lastMoveTimestamp) {
+      const activePlayer = room.turn === 'w' ? room.whitePlayer : room.blackPlayer;
+      if (activePlayer) {
+        activePlayer.timeRemainingSeconds = Math.max(0, activePlayer.timeRemainingSeconds - 1);
+        
+        if (activePlayer.timeRemainingSeconds <= 0) {
+          const winnerColor = room.turn === 'w' ? 'b' : 'w';
+          room.status = 'ended';
+          room.winner = winnerColor;
+          room.reason = 'Time Forfeit';
+          
+          io.to(code).emit('game_ended', {
+            winner: winnerColor,
+            reason: 'Time Forfeit',
+            fen: room.chess.fen(),
+          });
+        }
+      }
+    }
+  }
+}, 1000);
+
 io.on('connection', (socket: Socket) => {
   console.log(`[Socket] Connected: ${socket.id}`);
 
-  // Create private or public room
-  socket.on('create_room', ({ username, timeControl }: { username: string; timeControl: string }, callback) => {
+  // Safe helper to invoke ack callback
+  const safeCallback = (cb: unknown, data: Record<string, unknown>) => {
+    if (typeof cb === 'function') {
+      cb(data);
+    }
+  };
+
+  // Create room
+  socket.on('create_room', (payload: { username?: string; timeControl?: string }, callback) => {
+    const username = payload?.username || 'Player 1';
+    const timeControl = payload?.timeControl || '10+0';
+
     const code = generateRoomCode();
+    const initialTime = timeControl === '3+2' ? 180 : 600;
+
     const room: RoomState = {
       code,
       chess: new Chess(),
       whitePlayer: {
         id: socket.id,
         socketId: socket.id,
-        username: username || 'Player 1',
+        username,
         color: 'w',
-        timeRemainingSeconds: timeControl === '3+2' ? 180 : 600,
+        timeRemainingSeconds: initialTime,
       },
       blackPlayer: null,
-      timeControl: timeControl || '10+0',
+      timeControl,
       status: 'waiting',
       turn: 'w',
     };
@@ -72,41 +119,49 @@ io.on('connection', (socket: Socket) => {
     rooms[code] = room;
     socket.join(code);
 
-    callback({
+    safeCallback(callback, {
       success: true,
       roomCode: code,
       color: 'w',
       fen: room.chess.fen(),
     });
+
     console.log(`[Room Created] ${code} by ${username}`);
   });
 
   // Join room
-  socket.on('join_room', ({ roomCode, username }: { roomCode: string; username: string }, callback) => {
-    const code = roomCode.toUpperCase().trim();
+  socket.on('join_room', (payload: { roomCode?: string; username?: string }, callback) => {
+    if (!payload?.roomCode) {
+      return safeCallback(callback, { success: false, error: 'Room code required' });
+    }
+
+    const code = payload.roomCode.toUpperCase().trim();
     const room = rooms[code];
 
     if (!room) {
-      return callback({ success: false, error: 'Room not found' });
+      return safeCallback(callback, { success: false, error: 'Room not found' });
     }
 
     if (room.status !== 'waiting') {
-      return callback({ success: false, error: 'Room is full or game already started' });
+      return safeCallback(callback, { success: false, error: 'Room is full or game already started' });
     }
+
+    const username = payload.username || 'Player 2';
+    const initialTime = room.timeControl === '3+2' ? 180 : 600;
 
     room.blackPlayer = {
       id: socket.id,
       socketId: socket.id,
-      username: username || 'Player 2',
+      username,
       color: 'b',
-      timeRemainingSeconds: room.timeControl === '3+2' ? 180 : 600,
+      timeRemainingSeconds: initialTime,
     };
     room.status = 'playing';
     room.lastMoveTimestamp = Date.now();
 
     socket.join(code);
 
-    callback({
+    safeCallback(callback, {
       success: true,
       roomCode: code,
       color: 'b',
@@ -115,7 +170,7 @@ io.on('connection', (socket: Socket) => {
       blackUsername: room.blackPlayer?.username,
     });
 
-    // Notify both players that game started
+    // Notify all players game started
     io.to(code).emit('game_started', {
       fen: room.chess.fen(),
       whiteUsername: room.whitePlayer?.username,
@@ -126,34 +181,74 @@ io.on('connection', (socket: Socket) => {
     console.log(`[Room Joined] ${code} by ${username}`);
   });
 
-  // Make move (validated server-side)
-  socket.on('make_move', ({ roomCode, move }: { roomCode: string; move: { from: string; to: string; promotion?: string } }, callback) => {
-    const code = roomCode.toUpperCase().trim();
+  // Reconnect to active room after browser refresh or drop
+  socket.on('reconnect_room', (payload: { roomCode?: string; color?: 'w' | 'b' }, callback) => {
+    if (!payload?.roomCode) {
+      return safeCallback(callback, { success: false, error: 'Room code required' });
+    }
+
+    const code = payload.roomCode.toUpperCase().trim();
+    const room = rooms[code];
+
+    if (!room) {
+      return safeCallback(callback, { success: false, error: 'Room not found' });
+    }
+
+    const color = payload.color || 'w';
+    if (color === 'w' && room.whitePlayer) {
+      room.whitePlayer.socketId = socket.id;
+    } else if (color === 'b' && room.blackPlayer) {
+      room.blackPlayer.socketId = socket.id;
+    }
+
+    socket.join(code);
+
+    safeCallback(callback, {
+      success: true,
+      roomCode: code,
+      fen: room.chess.fen(),
+      turn: room.turn,
+      status: room.status,
+      whiteUsername: room.whitePlayer?.username,
+      blackUsername: room.blackPlayer?.username,
+    });
+
+    console.log(`[Room Reconnected] ${code} by ${socket.id} (${color})`);
+  });
+
+  // Make move
+  socket.on('make_move', (payload: { roomCode?: string; move?: { from: string; to: string; promotion?: string } }, callback) => {
+    if (!payload?.roomCode || !payload?.move) {
+      return safeCallback(callback, { success: false, error: 'Invalid payload' });
+    }
+
+    const code = payload.roomCode.toUpperCase().trim();
     const room = rooms[code];
 
     if (!room || room.status !== 'playing') {
-      return callback({ success: false, error: 'Invalid room state' });
+      return safeCallback(callback, { success: false, error: 'Invalid room or game not active' });
     }
 
     const currentTurnColor = room.chess.turn();
     const playerSocket = currentTurnColor === 'w' ? room.whitePlayer?.socketId : room.blackPlayer?.socketId;
 
     if (socket.id !== playerSocket) {
-      return callback({ success: false, error: 'Not your turn' });
+      return safeCallback(callback, { success: false, error: 'Not your turn' });
     }
 
     try {
       const result = room.chess.move({
-        from: move.from,
-        to: move.to,
-        promotion: move.promotion || 'q',
+        from: payload.move.from,
+        to: payload.move.to,
+        promotion: payload.move.promotion || 'q',
       });
 
       if (!result) {
-        return callback({ success: false, error: 'Illegal move rejected by server' });
+        return safeCallback(callback, { success: false, error: 'Illegal move rejected' });
       }
 
       room.turn = room.chess.turn() as 'w' | 'b';
+      room.lastMoveTimestamp = Date.now();
 
       const isGameOver = room.chess.isGameOver();
       if (isGameOver) {
@@ -167,11 +262,11 @@ io.on('connection', (socket: Socket) => {
         }
       }
 
-      callback({ success: true, fen: room.chess.fen(), san: result.san });
+      safeCallback(callback, { success: true, fen: room.chess.fen(), san: result.san });
 
-      // Broadcast move to all players in room
+      // Broadcast move to room
       io.to(code).emit('move_made', {
-        move: { from: move.from, to: move.to, promotion: move.promotion },
+        move: { from: payload.move.from, to: payload.move.to, promotion: payload.move.promotion },
         san: result.san,
         fen: room.chess.fen(),
         turn: room.turn,
@@ -179,16 +274,25 @@ io.on('connection', (socket: Socket) => {
         winner: room.winner,
         reason: room.reason,
       });
+
+      if (isGameOver) {
+        io.to(code).emit('game_ended', {
+          winner: room.winner,
+          reason: room.reason,
+          fen: room.chess.fen(),
+        });
+      }
     } catch (err) {
-      callback({ success: false, error: 'Invalid move execution' });
+      safeCallback(callback, { success: false, error: 'Failed to process move' });
     }
   });
 
-  // Resignation
-  socket.on('resign', ({ roomCode }: { roomCode: string }) => {
-    const code = roomCode.toUpperCase().trim();
+  // Resign
+  socket.on('resign', (payload: { roomCode?: string }) => {
+    if (!payload?.roomCode) return;
+    const code = payload.roomCode.toUpperCase().trim();
     const room = rooms[code];
-    if (!room) return;
+    if (!room || room.status !== 'playing') return;
 
     const resigningColor = socket.id === room.whitePlayer?.socketId ? 'w' : 'b';
     const winningColor = resigningColor === 'w' ? 'b' : 'w';
@@ -200,6 +304,36 @@ io.on('connection', (socket: Socket) => {
     io.to(code).emit('game_ended', {
       winner: winningColor,
       reason: room.reason,
+      fen: room.chess.fen(),
+    });
+  });
+
+  // Draw offer
+  socket.on('offer_draw', (payload: { roomCode?: string }) => {
+    if (!payload?.roomCode) return;
+    const code = payload.roomCode.toUpperCase().trim();
+    const room = rooms[code];
+    if (!room || room.status !== 'playing') return;
+
+    const offeringColor = socket.id === room.whitePlayer?.socketId ? 'w' : 'b';
+    socket.to(code).emit('draw_offered', { offeringColor });
+  });
+
+  // Accept draw
+  socket.on('accept_draw', (payload: { roomCode?: string }) => {
+    if (!payload?.roomCode) return;
+    const code = payload.roomCode.toUpperCase().trim();
+    const room = rooms[code];
+    if (!room || room.status !== 'playing') return;
+
+    room.status = 'ended';
+    room.winner = 'draw';
+    room.reason = 'Agreement';
+
+    io.to(code).emit('game_ended', {
+      winner: 'draw',
+      reason: 'Draw by Agreement',
+      fen: room.chess.fen(),
     });
   });
 
@@ -208,10 +342,24 @@ io.on('connection', (socket: Socket) => {
     console.log(`[Socket] Disconnected: ${socket.id}`);
     for (const code in rooms) {
       const room = rooms[code];
-      if (room.whitePlayer?.socketId === socket.id || room.blackPlayer?.socketId === socket.id) {
-        io.to(code).emit('opponent_disconnected', {
-          message: 'Opponent disconnected. Waiting 60s for reconnection...',
-        });
+      const isWhite = room.whitePlayer?.socketId === socket.id;
+      const isBlack = room.blackPlayer?.socketId === socket.id;
+
+      if (isWhite || isBlack) {
+        if (room.status === 'playing') {
+          io.to(code).emit('opponent_disconnected', {
+            message: 'Opponent disconnected.',
+          });
+        }
+
+        // Clean up empty room if both players leave
+        if (isWhite) room.whitePlayer = null;
+        if (isBlack) room.blackPlayer = null;
+
+        if (!room.whitePlayer && !room.blackPlayer) {
+          delete rooms[code];
+          console.log(`[Room Cleaned] ${code}`);
+        }
       }
     }
   });

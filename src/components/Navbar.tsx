@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { 
   Home, Play, BookOpen, Bot, BarChart2, Award, History, User, Settings as SettingsIcon,
-  Wifi, WifiOff, Sun, Moon, Menu, X, Cpu 
+  Wifi, WifiOff, Sun, Moon, Menu, X, Cpu, CheckCircle2 
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -94,19 +94,19 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Right Status Controls */}
           <div className="flex items-center gap-3">
-            {/* Online / Offline Pill */}
+            {/* Clean #22c55e Green Deployment / Connectivity Indicator */}
             <div
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${
                 isOnline
-                  ? 'bg-emerald-950/60 border-emerald-800/60 text-emerald-400'
+                  ? 'bg-[#22c55e]/10 border-[#22c55e]/40 text-[#22c55e]'
                   : 'bg-amber-950/60 border-amber-800/60 text-amber-400'
               }`}
             >
               {isOnline ? (
                 <>
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                  <span className="w-2 h-2 rounded-full bg-[#22c55e] animate-ping"></span>
                   <Wifi className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Online</span>
+                  <span className="hidden sm:inline">Online • Built & Deployed</span>
                 </>
               ) : (
                 <>
